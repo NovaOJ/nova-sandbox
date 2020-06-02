@@ -8,6 +8,7 @@ edition = "2018"
 
 [dependencies]
 
+time = "0.2.16"
 uuid = "0.8"
 cgroups-fs = "1.1.1"
 log = "0.4.8"
