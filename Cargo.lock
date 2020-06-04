@@ -56,7 +56,7 @@ version = "1.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "adfaa8c7e3dc2b1d8d186d8b88b31c80923844cf1cec1eb3fd3ea144980f426b"
 dependencies = [
- "nix",
+ "nix 0.15.0",
 ]
 
 [[package]]
@@ -143,11 +143,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "nix"
+version = "0.17.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "50e4785f2c3b7589a0d0c1dd60285e1188adac4006e8abd6dd578e1567027363"
+dependencies = [
+ "bitflags",
+ "cc",
+ "cfg-if",
+ "libc",
+ "void",
+]
+
+[[package]]
 name = "nova-sandbox"
 version = "0.1.0"
 dependencies = [
  "cgroups-fs",
  "log",
+ "nix 0.17.0",
  "pretty_env_logger",
  "time",
  "uuid",
