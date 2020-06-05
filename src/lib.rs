@@ -8,6 +8,7 @@ use std::process::Stdio;
 
 use time::prelude::*;
 
+/// Sandbox 的配置
 #[derive(Debug)]
 pub struct SandboxConfig {
     /// Rootfs 目录
@@ -31,20 +32,30 @@ pub struct SandboxConfig {
     pub stderr: Stdio,
 }
 
+/// Sandbox 运行状态种类
 #[derive(Debug)]
 pub enum SandboxStatusKind {
+    /// 超时
     TimeLimitExceeded,
+    /// 内存超限
     MemoryLimitExceeded,
+    /// 运行时错误/返回值非 0
     RuntimeError,
+    /// 正常
     Success, // tle > mle > re > seccess
 }
 
+/// 沙箱具体运行状态
 #[derive(Debug)]
 pub struct SandboxStatus {
-    status: SandboxStatusKind,
-    used_time: i128,
-    max_memory: u64,
-    return_code: i32,
+    /// 分类
+    pub status: SandboxStatusKind,
+    /// 使用时间
+    pub used_time: i128,
+    /// 使用内存
+    pub max_memory: u64,
+    /// 程序返回值
+    pub return_code: i32,
 }
 
 /// 根据 SandboxConfig 来执行命令
@@ -80,12 +91,23 @@ pub fn sanbox_run(config: SandboxConfig) -> Result<SandboxStatus, Box<dyn Error>
     let mut status = SandboxStatusKind::Success;
 
     log::info!("Init Sandbox");
-    // Create Directory
+    // Create && Check Directory
     if std::path::Path::new("/sys/fs/cgroup/memory/memory.memsw.usage_in_bytes").exists() == false {
         log::error!("Need \"cgroup_enable=memory swapaccount=1\" kernel parameter");
         return Err(String::from("Did't have sawpaccount!").into());
     }
 
+    // Check
+    if std::path::Path::new(&config.rootfs_directory).exists() == false {
+        log::error!("Rootfs Directory isn't exist!");
+        return Err(String::from("Rootfs Directory isn't exist!").into());
+    }
+    if std::path::Path::new(&config.work_directory).exists() == false {
+        log::error!("Work Directory isn't exist!");
+        return Err(String::from("Work Directory isn't exist!").into());
+    }
+
+    // Create
     if std::path::Path::new(target_rootfs_directory).exists() == false {
         std::fs::create_dir(target_rootfs_directory)?;
     }
@@ -204,6 +226,8 @@ pub trait SandboxCommandExt {
 }
 
 impl SandboxCommandExt for std::process::Command {
+    /// 用于 Command 执行前 Chroot 进入沙箱  
+    /// 应该在所有需要修改/读取 sysfs/procfs 的函数之后使用
     fn chroot(&mut self, dir: String) -> &mut Self {
         unsafe {
             self.pre_exec(move || {
@@ -212,6 +236,8 @@ impl SandboxCommandExt for std::process::Command {
             })
         }
     }
+    /// 用于在 Chroot 之后确定目录  
+    /// 应在 `SandboxCommandExt::chroot()` 后使用
     fn chdir(&mut self, dir: String) -> &mut Self {
         unsafe {
             self.pre_exec(move || {
