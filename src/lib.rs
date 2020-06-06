@@ -207,15 +207,11 @@ fn exec_sandbox(
 fn delete_sandbox(
     target_rootfs_directory: &str,
     target_work_directory: &str,
-    err_flag: bool,
 ) -> Result<(), Box<dyn Error>> {
-    log::info!("Remove Sandbox {}", err_flag);
+    log::info!("Remove Sandbox");
     // Umount rootfs
     let handle_err = |err| {
         log::error!("Failed to umount sandbox: {}", err);
-        if err_flag == true {
-            panic!("Failed to umount sandbox:{}", err);
-        }
     };
 
     nix::mount::umount(OsStr::new(target_work_directory)).unwrap_or_else(handle_err);
@@ -224,9 +220,6 @@ fn delete_sandbox(
     // Remove Directory
     let handle_err = |err| {
         log::error!("Failed to remove sandbox: {}", err);
-        if err_flag == true {
-            panic!("Failed to remove sandbox: {}", err);
-        }
     };
     std::fs::remove_dir(target_work_directory).unwrap_or_else(handle_err);
     std::fs::remove_dir(target_rootfs_directory).unwrap_or_else(handle_err);
@@ -260,22 +253,26 @@ pub fn sanbox_run(config: SandboxConfig) -> Result<SandboxStatus, Box<dyn Error>
     let target_rootfs_directory = &format!("/tmp/{}", cgroup_name);
     let target_work_directory = &format!("{}/tmp/{}", config.rootfs_directory, cgroup_name);
 
-    create_sandbox(&config, &target_rootfs_directory, &target_work_directory).unwrap_or_else(
-        |err| {
-            delete_sandbox(&target_rootfs_directory, &target_work_directory, false).unwrap();
+    match create_sandbox(&config, &target_rootfs_directory, &target_work_directory) {
+        Ok(()) => (),
+        Err(err) => {
+            delete_sandbox(&target_rootfs_directory, &target_work_directory).unwrap();
             log::error!("Failed create sandbox!");
-            panic!("Failed create sandbox: {}\n", err);
-        },
-    );
+            return Err(String::from(format!("Failed create sandbox: {}", err)).into());
+        }
+    };
 
-    let sanbox_status = exec_sandbox(config, &target_rootfs_directory, &cgroup_name)
-        .unwrap_or_else(|err| {
-            delete_sandbox(&target_rootfs_directory, &target_work_directory, false).unwrap();
+    let sanbox_status;
+    match exec_sandbox(config, &target_rootfs_directory, &cgroup_name) {
+        Ok(status) => sanbox_status = status,
+        Err(err) => {
+            delete_sandbox(&target_rootfs_directory, &target_work_directory).unwrap();
             log::error!("Failed run command in sandbox!");
-            panic!("Failed run command in sandbox: {}", err);
-        });
+            return Err(String::from(format!("Failed run command in sandbox: {}", err)).into());
+        }
+    };
 
-    delete_sandbox(&target_rootfs_directory, &target_work_directory, true)?;
+    delete_sandbox(&target_rootfs_directory, &target_work_directory)?;
 
     Ok(sanbox_status)
 }
