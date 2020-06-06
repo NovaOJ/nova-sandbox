@@ -58,37 +58,12 @@ pub struct SandboxStatus {
     pub return_code: i32,
 }
 
-/// 根据 SandboxConfig 来执行命令
-///
-/// # Examples
-///
-/// ```
-/// sanbox_run( SandboxConfig{
-///     rootfs_directory,
-///     time_limit: 1000,
-///     memory_limit: 512 * 1024 * 1024,
-///
-///     work_directory: work_directory,
-///
-///     command: "echo \"Hello, World\"".to_string(),
-///
-///     stdin: Stdio::null(),
-///     stdout: Stdio::inherit(),
-///     stderr: Stdio::inherit() } ).unwrap_or_else( |err|{
-///         log::error!( "Failed to run sandbox: {}", err );
-///         panic!( "{}", err );
-/// });
-/// ```
-pub fn sanbox_run(config: SandboxConfig) -> Result<SandboxStatus, Box<dyn Error>> {
-    use cgroups_fs::CgroupsCommandExt;
-    let cgroup_name = "wsl-sandbox";
-
+fn create_sandbox(
+    config: &SandboxConfig,
+    target_rootfs_directory: &str,
+    target_work_directory: &str,
+) -> Result<(), Box<dyn Error>> {
     let str_none: Option<&str> = None;
-    let target_rootfs_directory = &format!("/tmp/{}", cgroup_name);
-    let target_work_directory = &format!("{}/tmp/{}", config.rootfs_directory, cgroup_name);
-
-    let time_limit = ((config.time_limit + 500) / 1000 + 1).to_string();
-    let mut status = SandboxStatusKind::Success;
 
     log::info!("Init Sandbox");
     // Create && Check Directory
@@ -119,14 +94,14 @@ pub fn sanbox_run(config: SandboxConfig) -> Result<SandboxStatus, Box<dyn Error>
     // Rootfs
     nix::mount::mount(
         Some(OsStr::new(&config.rootfs_directory)),
-        OsStr::new(&target_rootfs_directory),
+        OsStr::new(target_rootfs_directory),
         str_none,
         nix::mount::MsFlags::MS_RDONLY | nix::mount::MsFlags::MS_BIND | nix::mount::MsFlags::MS_REC,
         str_none,
     )?;
     nix::mount::mount(
         str_none,
-        OsStr::new(&target_rootfs_directory),
+        OsStr::new(target_rootfs_directory),
         str_none,
         nix::mount::MsFlags::MS_RDONLY
             | nix::mount::MsFlags::MS_BIND
@@ -137,15 +112,28 @@ pub fn sanbox_run(config: SandboxConfig) -> Result<SandboxStatus, Box<dyn Error>
     // Work
     nix::mount::mount(
         Some(OsStr::new(&config.work_directory)),
-        OsStr::new(&target_work_directory),
+        OsStr::new(target_work_directory),
         str_none,
         nix::mount::MsFlags::MS_BIND | nix::mount::MsFlags::MS_REC,
         str_none,
     )?;
     log::info!("Done!");
 
+    Ok(())
+}
+
+fn exec_sandbox(
+    config: SandboxConfig,
+    target_rootfs_directory: &str,
+    cgroup_name: &str,
+) -> Result<SandboxStatus, Box<dyn Error>> {
+    use cgroups_fs::CgroupsCommandExt;
+
+    let time_limit = ((config.time_limit + 500) / 1000 + 1).to_string();
+    let mut status = SandboxStatusKind::Success;
+
     // Create new cgroup
-    log::info!("New cgroup {} create", cgroup_name);
+    log::debug!("New cgroup {} create", cgroup_name);
     let cur_cgroup = cgroups_fs::CgroupName::new(cgroup_name);
     let cur_cgroup = cgroups_fs::AutomanagedCgroup::init(&cur_cgroup, "memory")?;
     log::debug!("Memory Limit {}", config.memory_limit * 2);
@@ -153,7 +141,7 @@ pub fn sanbox_run(config: SandboxConfig) -> Result<SandboxStatus, Box<dyn Error>
     cur_cgroup.set_value("memory.memsw.limit_in_bytes", config.memory_limit * 2)?;
 
     // Run command
-    log::debug!(
+    log::info!(
         "Chroot {} to run '{}'",
         target_rootfs_directory,
         config.command
@@ -163,8 +151,8 @@ pub fn sanbox_run(config: SandboxConfig) -> Result<SandboxStatus, Box<dyn Error>
     let return_code = std::process::Command::new("timeout")
         .args(&[&time_limit, "bash", "-c", &config.command])
         .cgroups(&[&cur_cgroup])
-        .chroot(target_rootfs_directory.clone())
-        .chdir(format!("/tmp/{}", cgroup_name).clone())
+        .chroot(String::from(target_rootfs_directory))
+        .chdir(String::from(format!("/tmp/{}", cgroup_name)))
         .stdin(config.stdin)
         .stdout(config.stdout)
         .stderr(config.stderr)
@@ -182,6 +170,11 @@ pub fn sanbox_run(config: SandboxConfig) -> Result<SandboxStatus, Box<dyn Error>
 
     // Get return code
     let return_code = match return_code {
+        // Rust Crashes
+        Some(101) => {
+            log::error!("Failed to run command");
+            return Err(String::from("Failed to run command").into());
+        }
         Some(code) => code,
         None => 0,
     };
@@ -203,21 +196,88 @@ pub fn sanbox_run(config: SandboxConfig) -> Result<SandboxStatus, Box<dyn Error>
     }
     let used_time = used_time.whole_milliseconds();
 
-    log::info!("Remove Sandbox");
-    // Umount rootfs
-    nix::mount::umount(OsStr::new(&target_work_directory))?;
-    nix::mount::umount(OsStr::new(&target_rootfs_directory))?;
-    // Remove Directory
-    std::fs::remove_dir(target_work_directory)?;
-    std::fs::remove_dir(target_rootfs_directory)?;
-    log::info!("Done!");
-
     Ok(SandboxStatus {
         status,
         max_memory,
         used_time,
         return_code,
     })
+}
+
+fn delete_sandbox(
+    target_rootfs_directory: &str,
+    target_work_directory: &str,
+    err_flag: bool,
+) -> Result<(), Box<dyn Error>> {
+    log::info!("Remove Sandbox {}", err_flag);
+    // Umount rootfs
+    let handle_err = |err| {
+        log::error!("Failed to umount sandbox: {}", err);
+        if err_flag == true {
+            panic!("Failed to umount sandbox:{}", err);
+        }
+    };
+
+    nix::mount::umount(OsStr::new(target_work_directory)).unwrap_or_else(handle_err);
+    nix::mount::umount(OsStr::new(target_rootfs_directory)).unwrap_or_else(handle_err);
+
+    // Remove Directory
+    let handle_err = |err| {
+        log::error!("Failed to remove sandbox: {}", err);
+        if err_flag == true {
+            panic!("Failed to remove sandbox: {}", err);
+        }
+    };
+    std::fs::remove_dir(target_work_directory).unwrap_or_else(handle_err);
+    std::fs::remove_dir(target_rootfs_directory).unwrap_or_else(handle_err);
+    log::info!("Done!");
+    Ok(())
+}
+
+/// 根据 SandboxConfig 来执行命令
+///
+/// # Examples
+///
+/// ```
+/// sanbox_run( SandboxConfig{
+///     rootfs_directory,
+///     time_limit: 1000,
+///     memory_limit: 512 * 1024 * 1024,
+///
+///     work_directory: work_directory,
+///
+///     command: "echo \"Hello, World\"".to_string(),
+///
+///     stdin: Stdio::null(),
+///     stdout: Stdio::inherit(),
+///     stderr: Stdio::inherit() } ).unwrap_or_else( |err|{
+///         log::error!( "Failed to run sandbox: {}", err );
+///         panic!( "{}", err );
+/// });
+/// ```
+pub fn sanbox_run(config: SandboxConfig) -> Result<SandboxStatus, Box<dyn Error>> {
+    let cgroup_name = "wsl-sandbox";
+    let target_rootfs_directory = &format!("/tmp/{}", cgroup_name);
+    let target_work_directory = &format!("{}/tmp/{}", config.rootfs_directory, cgroup_name);
+
+    create_sandbox(&config, &target_rootfs_directory, &target_work_directory).unwrap_or_else(
+        |err| {
+            delete_sandbox(&target_rootfs_directory, &target_work_directory, false).unwrap();
+            log::error!("Failed create sandbox!");
+            panic!("Failed create sandbox: {}\n", err);
+        },
+    );
+
+    let sanbox_status = exec_sandbox(config, &target_rootfs_directory, &cgroup_name)
+        .unwrap_or_else(|err| {
+            delete_sandbox(&target_rootfs_directory, &target_work_directory, false).unwrap();
+            log::error!("Failed run command in sandbox!");
+            panic!("Failed run command in sandbox: {}", err);
+        });
+
+    delete_sandbox(&target_rootfs_directory, &target_work_directory, true)?;
+
+    Ok(sanbox_status)
 }
 
 pub trait SandboxCommandExt {
