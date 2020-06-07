@@ -22,6 +22,7 @@ pub struct SandboxConfig {
     /// 执行时只有这个目录是可写的  
     /// Rootfs 是以**只读方式**挂载的  
     /// **Warn: 程序对这个目录有全部权限**
+    /// **Warn: Do not set "/tmp" value for this var**
     pub work_directory: String,
 
     /// 要执行的命令
@@ -45,7 +46,7 @@ pub enum SandboxStatusKind {
     Success, // tle > mle > re > seccess
 }
 
-/// 沙箱具体运行状态
+/// 沙箱运行状态
 #[derive(Debug)]
 pub struct SandboxStatus {
     /// 分类
@@ -69,7 +70,7 @@ fn create_sandbox(
     // Create && Check Directory
     if std::path::Path::new("/sys/fs/cgroup/memory/memory.memsw.usage_in_bytes").exists() == false {
         log::error!("Need \"cgroup_enable=memory swapaccount=1\" kernel parameter");
-        return Err(String::from("Did't have sawpaccount!").into());
+        return Err(String::from("Didn't have sawpaccount!").into());
     }
 
     // Check
@@ -152,7 +153,7 @@ fn exec_sandbox(
         .args(&[&time_limit, "bash", "-c", &config.command])
         .cgroups(&[&cur_cgroup])
         .chroot(String::from(target_rootfs_directory))
-        .chdir(String::from(format!("/tmp/{}", cgroup_name)))
+        .chdir(String::from(format!("/sandbox-{}", cgroup_name)))
         .stdin(config.stdin)
         .stdout(config.stdout)
         .stderr(config.stderr)
@@ -176,7 +177,7 @@ fn exec_sandbox(
             return Err(String::from("Failed to run command").into());
         }
         Some(code) => code,
-        None => 0,
+        None => -1,
     };
     if return_code != 0 {
         status = SandboxStatusKind::RuntimeError;
@@ -212,10 +213,19 @@ fn delete_sandbox(
     // Umount rootfs
     let handle_err = |err| {
         log::error!("Failed to umount sandbox: {}", err);
+        println!("{}", err);
     };
 
-    nix::mount::umount(OsStr::new(target_work_directory)).unwrap_or_else(handle_err);
-    nix::mount::umount(OsStr::new(target_rootfs_directory)).unwrap_or_else(handle_err);
+    nix::mount::umount2(
+        OsStr::new(target_work_directory),
+        nix::mount::MntFlags::MNT_DETACH,
+    )
+    .unwrap_or_else(handle_err);
+    nix::mount::umount2(
+        OsStr::new(target_rootfs_directory),
+        nix::mount::MntFlags::MNT_DETACH,
+    )
+    .unwrap_or_else(handle_err);
 
     // Remove Directory
     let handle_err = |err| {
@@ -232,7 +242,12 @@ fn delete_sandbox(
 /// # Examples
 ///
 /// ```
-/// sanbox_run( SandboxConfig{
+/// use std::process::Stdio;
+/// use nova_sandbox::*;
+///
+/// let work_directory = String::from("/work/novaoj/nova-sandbox/tests");
+/// let rootfs_directory = String::from("/work/package/debs/debian-rootfs/");
+/// sandbox_run( SandboxConfig{
 ///     rootfs_directory,
 ///     time_limit: 1000,
 ///     memory_limit: 512 * 1024 * 1024,
@@ -248,10 +263,10 @@ fn delete_sandbox(
 ///         panic!( "{}", err );
 /// });
 /// ```
-pub fn sanbox_run(config: SandboxConfig) -> Result<SandboxStatus, Box<dyn Error>> {
-    let cgroup_name = "wsl-sandbox";
-    let target_rootfs_directory = &format!("/tmp/{}", cgroup_name);
-    let target_work_directory = &format!("{}/tmp/{}", config.rootfs_directory, cgroup_name);
+pub fn sandbox_run(config: SandboxConfig) -> Result<SandboxStatus, Box<dyn Error>> {
+    let cgroup_name = uuid::Uuid::new_v4().to_string();
+    let target_rootfs_directory = &format!("/tmp/sandbox-{}", cgroup_name);
+    let target_work_directory = &format!("{}/sandbox-{}", config.rootfs_directory, cgroup_name);
 
     match create_sandbox(&config, &target_rootfs_directory, &target_work_directory) {
         Ok(()) => (),
@@ -310,7 +325,7 @@ mod test {
     use super::*;
     #[test]
     fn hello_world() {
-        sanbox_run(SandboxConfig {
+        sandbox_run(SandboxConfig {
             rootfs_directory: "/work/package/debs/debian-rootfs/".to_string(),
             time_limit: 1000,
             memory_limit: 512 * 1024 * 1024,
