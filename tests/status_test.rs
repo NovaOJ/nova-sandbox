@@ -2,19 +2,21 @@ use nova_sandbox::*;
 use std::process::Stdio;
 
 fn run_sandbox(command: String, test_id: &str) -> SandboxStatus {
-    let work_directory = String::from(format!("/work/novaoj/nova-sandbox/tests/{}", test_id));
-    let rootfs_directory = String::from("/work/package/debs/debian-rootfs/");
-    sandbox_run(SandboxConfig {
-        work_directory,
-        rootfs_directory,
-        time_limit: 5000,
-        memory_limit: 256 * 1024 * 1024,
-        command,
-        stdin: Stdio::null(),
-        stdout: Stdio::null(),
-        stderr: Stdio::null(),
-    })
-    .unwrap()
+    let sandbox = Sandbox::create(
+        "/work/package/debs/debian-rootfs",
+        &format!("/work/novaoj/nova-sandbox/tests/{}", test_id),
+    )
+    .unwrap();
+    sandbox
+        .exec(SandboxConfig {
+            time_limit: 5000,
+            memory_limit: 256 * 1024 * 1024,
+            command,
+            stdin: Stdio::null(),
+            stdout: Stdio::null(),
+            stderr: Stdio::inherit(),
+        })
+        .unwrap()
 }
 
 #[test]
