@@ -3,4 +3,5 @@
 - [x] Mount dir use bind
 - [x] Use lib to mount
 - [x] Add swap used when calc memory used
-- [ ] Check to `libmount`
+- [x] Change to `libmount`
+- [ ] Try to use overlayfs

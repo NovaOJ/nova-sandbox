@@ -10,6 +10,7 @@ edition = "2018"
 
 cgroups-fs = "1.1.1"
 log = "0.4.8"
+libmount = "0.1.15"
 nix = "0.17.0"
 pretty_env_logger = "0.4.0"
 time = "0.2.16"

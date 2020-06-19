@@ -71,7 +71,6 @@ impl Sandbox {
         let target_rootfs_directory = &format!("/tmp/sandbox-{}", sandbox_id);
         let target_work_directory = &format!("{}/sandbox-{}", rootfs_directory, sandbox_id);
 
-        let str_none: Option<&str> = None;
         log::info!("Init Sandbox");
         // Create && Check Directory
 
@@ -104,33 +103,11 @@ impl Sandbox {
 
         // Mount Directory
         // Rootfs
-        nix::mount::mount(
-            Some(OsStr::new(rootfs_directory)),
-            OsStr::new(target_rootfs_directory),
-            str_none,
-            nix::mount::MsFlags::MS_RDONLY
-                | nix::mount::MsFlags::MS_BIND
-                | nix::mount::MsFlags::MS_REC,
-            str_none,
-        )?;
-        nix::mount::mount(
-            str_none,
-            OsStr::new(target_rootfs_directory),
-            str_none,
-            nix::mount::MsFlags::MS_RDONLY
-                | nix::mount::MsFlags::MS_BIND
-                | nix::mount::MsFlags::MS_REMOUNT
-                | nix::mount::MsFlags::MS_REC,
-            str_none,
-        )?;
+        libmount::BindMount::new(OsStr::new(rootfs_directory), target_rootfs_directory)
+            .readonly(true)
+            .mount()?;
         // Work
-        nix::mount::mount(
-            Some(OsStr::new(work_directory)),
-            OsStr::new(target_work_directory),
-            str_none,
-            nix::mount::MsFlags::MS_BIND | nix::mount::MsFlags::MS_REC,
-            str_none,
-        )?;
+        libmount::BindMount::new(OsStr::new(work_directory), target_work_directory).mount()?;
         log::info!("Done!");
 
         // Create new cgroup
@@ -227,11 +204,7 @@ impl Sandbox {
             log::error!("Failed to umount sandbox: {}", err);
         };
 
-        nix::mount::umount2(
-            OsStr::new(&self.work_directory),
-            nix::mount::MntFlags::MNT_DETACH,
-        )
-        .unwrap_or_else(handle_err);
+        nix::mount::umount(OsStr::new(&self.work_directory)).unwrap_or_else(handle_err);
         nix::mount::umount2(
             OsStr::new(&self.rootfs_directory),
             nix::mount::MntFlags::MNT_DETACH,
