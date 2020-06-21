@@ -7,8 +7,11 @@ use std::process::Stdio;
 fn main() {
     pretty_env_logger::init();
     log::info!("Start Program");
-    let sandbox =
-        Sandbox::create("/work/package/debs/debian-rootfs", "/home/woshiluo/tmp").unwrap();
+    let sandbox = Sandbox::create(
+        "/work/package/debs/debian-rootfs",
+        "/home/woshiluo/tmp/test",
+    )
+    .unwrap();
 
     let status = sandbox
         .exec(SandboxConfig {
@@ -21,8 +24,8 @@ fn main() {
             //        command: String::from( "echo 1 > /qwq" ),
             //        command: String::from( "rm /tmp/a.out" ),
             //command: String::from("ls"),
-            //command: String::from("g++ temp.cpp"),
-            command: String::from("./a.out"),
+            command: String::from("g++ temp.cpp"),
+            //command: String::from("./a.out"),
             stdin: Stdio::null(),
             stdout: Stdio::inherit(),
             stderr: Stdio::inherit(),

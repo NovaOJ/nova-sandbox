@@ -53,13 +53,14 @@ pub struct SandboxStatus {
 pub struct Sandbox {
     /// Rootfs 目录
     pub sandbox_id: String,
-    pub rootfs_directory: String,
+    pub rootfs_directory: std::path::PathBuf,
+    sandbox_directory: std::path::PathBuf,
     /// Work Directory  
     /// 执行时只有这个目录是可写的  
     /// Rootfs 是以**只读方式**挂载的  
     /// **Warn: 程序对这个目录有全部权限**
     /// **Warn: Do not set "/tmp" value for this var**
-    pub work_directory: String,
+    pub work_directory: std::path::PathBuf,
     pub cur_cgroup: cgroups_fs::AutomanagedCgroup,
 }
 
@@ -68,9 +69,12 @@ impl Sandbox {
     pub fn create(rootfs_directory: &str, work_directory: &str) -> Result<Sandbox, Box<dyn Error>> {
         //{{{
         let sandbox_id = uuid::Uuid::new_v4().to_string();
-        let target_rootfs_directory = &format!("/tmp/sandbox-{}", sandbox_id);
-        let target_work_directory = &format!("{}/sandbox-{}", rootfs_directory, sandbox_id);
-
+        let rootfs_directory = std::path::PathBuf::from(rootfs_directory);
+        let work_directory = std::path::PathBuf::from(work_directory);
+        let sandbox_directory = work_directory
+            .parent()
+            .unwrap()
+            .join(format!(".sandbox-{}", sandbox_id));
         log::info!("Init Sandbox");
         // Create && Check Directory
 
@@ -83,31 +87,32 @@ impl Sandbox {
         }
 
         // Check
-        if std::path::Path::new(rootfs_directory).exists() == false {
+        if rootfs_directory.exists() == false {
             log::error!("Rootfs Directory isn't exist!");
-            return Err(String::from("Rootfs Directory isn't exist!").into());
+            return Err(String::from("Rootfs Directory isn't exists!").into());
         }
-        if std::path::Path::new(work_directory).exists() == false {
+        if work_directory.exists() == false {
             log::error!("Work Directory isn't exist!");
-            return Err(String::from("Work Directory isn't exist!").into());
+            return Err(String::from("Work Directory isn't exists!").into());
+        }
+        if sandbox_directory.exists() == true {
+            log::error!("Sandbox Directory is exists");
+            return Err(String::from("Sandbox Directory is exists!").into());
         }
 
         // Create
-        if std::path::Path::new(target_rootfs_directory).exists() == false {
-            std::fs::create_dir(target_rootfs_directory)?;
-        }
-        if std::path::Path::new(target_work_directory).exists() == false {
-            std::fs::create_dir(target_work_directory)?;
-        }
+        std::fs::create_dir(&sandbox_directory)?;
         log::debug!("Create Dir Done!");
 
         // Mount Directory
-        // Rootfs
-        libmount::BindMount::new(OsStr::new(rootfs_directory), target_rootfs_directory)
-            .readonly(true)
-            .mount()?;
-        // Work
-        libmount::BindMount::new(OsStr::new(work_directory), target_work_directory).mount()?;
+        let lower_dirs = [&rootfs_directory];
+        libmount::Overlay::writable(
+            lower_dirs.iter().map(|x| x.as_ref()),
+            &work_directory,
+            &sandbox_directory,
+            &sandbox_directory,
+        )
+        .mount()?;
         log::info!("Done!");
 
         // Create new cgroup
@@ -118,8 +123,9 @@ impl Sandbox {
         Ok(Sandbox {
             sandbox_id,
             cur_cgroup,
-            rootfs_directory: String::from(target_rootfs_directory),
-            work_directory: String::from(target_work_directory),
+            rootfs_directory,
+            sandbox_directory,
+            work_directory,
         })
     } //}}}
     pub fn exec(&self, config: SandboxConfig) -> Result<SandboxStatus, Box<dyn Error>> {
@@ -135,16 +141,16 @@ impl Sandbox {
             .set_value("memory.memsw.limit_in_bytes", config.memory_limit * 2)?;
         // Run command
         log::info!(
-            "Chroot {} to run '{}'",
+            "Chroot {:?} to run '{}'",
             self.rootfs_directory,
             config.command
         );
         let time_start = time::Instant::now();
         let return_code = std::process::Command::new("timeout")
             .args(&[&time_limit, "bash", "-c", &config.command])
+            .current_dir(&self.sandbox_directory)
             .cgroups(&[&self.cur_cgroup])
-            .current_dir(String::from(&self.work_directory))
-            .chroot(String::from(&self.rootfs_directory))
+            .chroot(self.sandbox_directory.to_str().unwrap().to_string())
             .stdin(config.stdin)
             .stdout(config.stdout)
             .stderr(config.stderr)
@@ -204,19 +210,13 @@ impl Sandbox {
             log::error!("Failed to umount sandbox: {}", err);
         };
 
-        nix::mount::umount(OsStr::new(&self.work_directory)).unwrap_or_else(handle_err);
-        nix::mount::umount2(
-            OsStr::new(&self.rootfs_directory),
-            nix::mount::MntFlags::MNT_DETACH,
-        )
-        .unwrap_or_else(handle_err);
+        nix::mount::umount(OsStr::new(&self.sandbox_directory)).unwrap_or_else(handle_err);
 
         // Remove Directory
         let handle_err = |err| {
             log::error!("Failed to remove sandbox: {}", err);
         };
-        std::fs::remove_dir(&self.work_directory).unwrap_or_else(handle_err);
-        std::fs::remove_dir(&self.rootfs_directory).unwrap_or_else(handle_err);
+        std::fs::remove_dir_all(&self.sandbox_directory).unwrap_or_else(handle_err);
         log::info!("Done!");
     }
 } //}}}
