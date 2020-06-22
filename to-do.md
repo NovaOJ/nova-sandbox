@@ -6,4 +6,5 @@
 - [x] Change to `libmount`
 - [x] Try to use overlayfs
 - [ ] mountpoint
-- [ ] try to use `wait_timeout`
+- [x] try to use `wait_timeout`
+- [ ] Rewrite test

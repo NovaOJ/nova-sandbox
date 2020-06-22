@@ -6,13 +6,13 @@ use std::ffi::OsStr;
 use std::os::unix::process::CommandExt;
 use std::process::Stdio;
 
-use time::prelude::*;
+// use time::prelude::*;
 
 /// Sandbox 的配置
 #[derive(Debug)]
 pub struct SandboxConfig {
     /// 时间限制（以 ms 为单位）
-    pub time_limit: u32,
+    pub time_limit: u64,
     /// 内存限制（以 Byte 为单位）
     pub memory_limit: u64,
 
@@ -43,7 +43,7 @@ pub struct SandboxStatus {
     /// 分类
     pub status: SandboxStatusKind,
     /// 使用时间
-    pub used_time: i128,
+    pub used_time: u128,
     /// 使用内存
     pub max_memory: u64,
     /// 程序返回值
@@ -51,26 +51,36 @@ pub struct SandboxStatus {
 }
 
 pub struct Sandbox {
-    /// Rootfs 目录
+    /// Sandbox ID
     pub sandbox_id: String,
+
+    /// Rootfs 目录
     pub rootfs_directory: std::path::PathBuf,
-    sandbox_directory: std::path::PathBuf,
     /// Work Directory  
     /// 执行时只有这个目录是可写的  
     /// Rootfs 是以**只读方式**挂载的  
+    /// 这个目录的父级应当和这个目录在同一文件系统内，否则无法启动沙箱
     /// **Warn: 程序对这个目录有全部权限**
     /// **Warn: Do not set "/tmp" value for this var**
     pub work_directory: std::path::PathBuf,
+
+    /// 沙箱挂载点
+    sandbox_directory: std::path::PathBuf,
+    /// 管理内存的 Cgroup
     pub cur_cgroup: cgroups_fs::AutomanagedCgroup,
 }
 
 impl Sandbox {
     //{{{
-    pub fn create(rootfs_directory: &str, work_directory: &str) -> Result<Sandbox, Box<dyn Error>> {
+    pub fn create<T, U>(rootfs_directory: T, work_directory: U) -> Result<Sandbox, Box<dyn Error>>
+    where
+        T: AsRef<std::path::Path>,
+        U: AsRef<std::path::Path>,
+    {
         //{{{
         let sandbox_id = uuid::Uuid::new_v4().to_string();
-        let rootfs_directory = std::path::PathBuf::from(rootfs_directory);
-        let work_directory = std::path::PathBuf::from(work_directory);
+        let rootfs_directory = std::path::PathBuf::from(rootfs_directory.as_ref());
+        let work_directory = std::path::PathBuf::from(work_directory.as_ref());
         let sandbox_directory = work_directory
             .parent()
             .unwrap()
@@ -102,7 +112,10 @@ impl Sandbox {
 
         // Create
         std::fs::create_dir(&sandbox_directory)?;
-        log::debug!("Create Dir Done!");
+        if sandbox_directory.exists() == false {
+            log::error!("Sandbox Directory is exists");
+            return Err(String::from("Sandbox Directory is exists!").into());
+        }
 
         // Mount Directory
         let lower_dirs = [&rootfs_directory];
@@ -131,32 +144,44 @@ impl Sandbox {
     pub fn exec(&self, config: SandboxConfig) -> Result<SandboxStatus, Box<dyn Error>> {
         //{{{
         use cgroups_fs::CgroupsCommandExt;
-        let time_limit = ((config.time_limit + 500) / 1000 + 1).to_string();
+        use wait_timeout::ChildExt;
+        let time_limit = std::time::Duration::from_millis(config.time_limit + 500);
         let mut status = SandboxStatusKind::Success;
 
+        // Pre
         log::debug!("Memory Limit {}", config.memory_limit * 2);
         self.cur_cgroup
             .set_value("memory.limit_in_bytes", config.memory_limit * 2)?;
         self.cur_cgroup
             .set_value("memory.memsw.limit_in_bytes", config.memory_limit * 2)?;
-        // Run command
+
         log::info!(
             "Chroot {:?} to run '{}'",
-            self.rootfs_directory,
+            self.sandbox_directory,
             config.command
         );
-        let time_start = time::Instant::now();
-        let return_code = std::process::Command::new("timeout")
-            .args(&[&time_limit, "bash", "-c", &config.command])
+        let mut child_exec = std::process::Command::new("bash")
+            .args(&["-c", &config.command])
             .current_dir(&self.sandbox_directory)
             .cgroups(&[&self.cur_cgroup])
             .chroot(self.sandbox_directory.to_str().unwrap().to_string())
             .stdin(config.stdin)
             .stdout(config.stdout)
             .stderr(config.stderr)
-            .status()?
-            .code();
-        let time_end = time::Instant::now();
+            .spawn()?;
+
+        log::debug!("spawned");
+        // Run command
+        let time_start = std::time::Instant::now();
+        let return_code = match child_exec.wait_timeout(time_limit)? {
+            Some(status) => status.code(),
+            _ => {
+                log::debug!("Time Limit: {:?}, TLE", time_limit);
+                child_exec.kill()?;
+                child_exec.wait()?.code()
+            }
+        };
+        let time_end = std::time::Instant::now();
 
         log::debug!("Return code: {:?}", return_code);
         log::debug!(
@@ -191,10 +216,10 @@ impl Sandbox {
         // Calc time
         let used_time = time_end - time_start;
         log::debug!("{:?}", used_time);
-        if used_time > config.time_limit.milliseconds() {
+        if used_time > std::time::Duration::from_millis(config.time_limit) {
             status = SandboxStatusKind::TimeLimitExceeded;
         }
-        let used_time = used_time.whole_milliseconds();
+        let used_time = used_time.as_millis();
 
         Ok(SandboxStatus {
             status,
@@ -213,10 +238,10 @@ impl Sandbox {
         nix::mount::umount(OsStr::new(&self.sandbox_directory)).unwrap_or_else(handle_err);
 
         // Remove Directory
-        let handle_err = |err| {
-            log::error!("Failed to remove sandbox: {}", err);
-        };
-        std::fs::remove_dir_all(&self.sandbox_directory).unwrap_or_else(handle_err);
+        //let handle_err = |err| {
+        //    log::error!("Failed to remove sandbox: {}", err);
+        //};
+        //std::fs::remove_dir_all(&self.sandbox_directory).unwrap_or_else(handle_err);
         log::info!("Done!");
     }
 } //}}}
@@ -236,6 +261,7 @@ impl SandboxCommandExt for std::process::Command {
     /// 用于 Command 执行前 Chroot 进入沙箱  
     /// 应该在所有需要修改/读取 sysfs/procfs 的函数之后使用
     fn chroot(&mut self, dir: String) -> &mut Self {
+        log::debug!("Chroot to {}", dir);
         unsafe {
             self.pre_exec(move || {
                 nix::unistd::chroot(OsStr::new(&dir)).unwrap();
