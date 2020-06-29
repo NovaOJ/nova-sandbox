@@ -11,7 +11,7 @@ fn reuse() {
     let config = SandboxConfig {
         time_limit: 5000,
         memory_limit: 256 * 1024 * 1024,
-        command: String::from("ls"),
+        command: "ls",
         stdin: Stdio::null(),
         stdout: Stdio::null(),
         stderr: Stdio::inherit(),
@@ -21,7 +21,7 @@ fn reuse() {
     let config = SandboxConfig {
         time_limit: 5000,
         memory_limit: 256 * 1024 * 1024,
-        command: String::from("ls"),
+        command: "ls",
         stdin: Stdio::null(),
         stdout: Stdio::null(),
         stderr: Stdio::inherit(),

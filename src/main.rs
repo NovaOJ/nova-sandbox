@@ -25,7 +25,7 @@ fn main() {
             //        command: String::from( "rm /tmp/a.out" ),
             //command: String::from("ls"),
             // command: String::from("g++ temp.cpp"),
-            command: String::from("./a.out"),
+            command: "./a.out",
             stdin: Stdio::null(),
             stdout: Stdio::inherit(),
             stderr: Stdio::inherit(),

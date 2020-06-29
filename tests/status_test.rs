@@ -1,7 +1,7 @@
 use nova_sandbox::*;
 use std::process::Stdio;
 
-fn run_sandbox(command: String, test_id: &str) -> SandboxStatus {
+fn run_sandbox(command: &str, test_id: &str) -> SandboxStatus {
     let sandbox = Sandbox::create(
         "/work/package/debs/debian-rootfs",
         &format!("/work/novaoj/nova-sandbox/tests/{}", test_id),
@@ -22,14 +22,14 @@ fn run_sandbox(command: String, test_id: &str) -> SandboxStatus {
 #[test]
 fn tle() {
     let exec = |command| run_sandbox(command, "tle");
-    let status = exec(String::from("g++ ./tle.cpp -o tle.run"));
+    let status = exec("g++ ./tle.cpp -o tle.run");
 
     if let SandboxStatusKind::Success = status.status {
     } else {
         panic!("Failed to compile test: {:?}", status);
     }
 
-    let status = exec(String::from("./tle.run"));
+    let status = exec("./tle.run");
 
     if let SandboxStatusKind::TimeLimitExceeded = status.status {
     } else {
@@ -40,14 +40,14 @@ fn tle() {
 #[test]
 fn mle() {
     let exec = |command| run_sandbox(command, "mle");
-    let status = exec(String::from("g++ ./mle.cpp -o mle.run"));
+    let status = exec("g++ ./mle.cpp -o mle.run");
 
     if let SandboxStatusKind::Success = status.status {
     } else {
         panic!("Failed to compile test: {:?}", status);
     }
 
-    let status = exec(String::from("./mle.run"));
+    let status = exec("./mle.run");
 
     if let SandboxStatusKind::MemoryLimitExceeded = status.status {
     } else {
@@ -58,14 +58,14 @@ fn mle() {
 #[test]
 fn re() {
     let exec = |command| run_sandbox(command, "re");
-    let status = exec(String::from("g++ ./re.cpp -o re.run"));
+    let status = exec("g++ ./re.cpp -o re.run");
 
     if let SandboxStatusKind::Success = status.status {
     } else {
         panic!("Failed to compile test: {:?}", status);
     }
 
-    let status = exec(String::from("./re.run"));
+    let status = exec("./re.run");
 
     if let SandboxStatusKind::RuntimeError = status.status {
     } else {

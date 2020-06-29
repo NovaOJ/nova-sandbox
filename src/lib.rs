@@ -10,14 +10,14 @@ use std::process::Stdio;
 
 /// Sandbox 的配置
 #[derive(Debug)]
-pub struct SandboxConfig {
+pub struct SandboxConfig<'a> {
     /// 时间限制（以 ms 为单位）
     pub time_limit: u64,
     /// 内存限制（以 Byte 为单位）
     pub memory_limit: u64,
 
     /// 要执行的命令
-    pub command: String,
+    pub command: &'a str,
 
     pub stdin: Stdio,
     pub stdout: Stdio,
