@@ -11,6 +11,7 @@ fn run_sandbox(command: &str, test_id: &str) -> SandboxStatus {
         .exec(SandboxConfig {
             time_limit: 5000,
             memory_limit: 256 * 1024 * 1024,
+            pids_limit: 8,
             command,
             stdin: Stdio::null(),
             stdout: Stdio::null(),
@@ -71,6 +72,12 @@ fn re() {
     } else {
         panic!("Failed to exec program: {:?}", status);
     }
+}
+
+#[test]
+fn fork_bomb() {
+    let exec = |command| run_sandbox(command, "fork_bomb");
+    exec(":() { :|:& };:");
 }
 
 // #[test]

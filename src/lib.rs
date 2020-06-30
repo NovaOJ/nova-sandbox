@@ -15,6 +15,7 @@ pub struct SandboxConfig<'a> {
     pub time_limit: u64,
     /// 内存限制（以 Byte 为单位）
     pub memory_limit: u64,
+    pub pids_limit: u64,
 
     /// 要执行的命令
     pub command: &'a str,
@@ -66,8 +67,8 @@ pub struct Sandbox {
 
     /// 沙箱挂载点
     sandbox_directory: std::path::PathBuf,
-    /// 管理内存的 Cgroup
-    pub cur_cgroup: cgroups_fs::AutomanagedCgroup,
+    /// Cgroups
+    pub cur_cgroup: [cgroups_fs::AutomanagedCgroup; 2],
 }
 
 impl Sandbox {
@@ -131,7 +132,10 @@ impl Sandbox {
         // Create new cgroup
         log::debug!("New cgroup {} create", sandbox_id);
         let cur_cgroup = cgroups_fs::CgroupName::new(&sandbox_id);
-        let cur_cgroup = cgroups_fs::AutomanagedCgroup::init(&cur_cgroup, "memory")?;
+        let cur_cgroup = [
+            cgroups_fs::AutomanagedCgroup::init(&cur_cgroup, "memory")?,
+            cgroups_fs::AutomanagedCgroup::init(&cur_cgroup, "pids")?,
+        ];
 
         Ok(Sandbox {
             sandbox_id,
@@ -150,10 +154,10 @@ impl Sandbox {
 
         // Pre
         log::debug!("Memory Limit {}", config.memory_limit * 2);
-        self.cur_cgroup
-            .set_value("memory.limit_in_bytes", config.memory_limit * 2)?;
-        self.cur_cgroup
-            .set_value("memory.memsw.limit_in_bytes", config.memory_limit * 2)?;
+        log::debug!("Pids Limit {}", config.memory_limit * 2);
+        self.cur_cgroup[0].set_value("memory.limit_in_bytes", config.memory_limit * 2)?;
+        self.cur_cgroup[0].set_value("memory.memsw.limit_in_bytes", config.memory_limit * 2)?;
+        self.cur_cgroup[1].set_value("pids.max", config.pids_limit)?;
 
         log::info!(
             "Chroot {:?} to run '{}'",
@@ -163,7 +167,7 @@ impl Sandbox {
         let mut child_exec = std::process::Command::new("bash")
             .args(&["-c", &config.command])
             .current_dir(&self.sandbox_directory)
-            .cgroups(&[&self.cur_cgroup])
+            .cgroups(&self.cur_cgroup)
             .chroot(self.sandbox_directory.to_str().unwrap().to_string())
             .stdin(config.stdin)
             .stdout(config.stdout)
@@ -171,17 +175,31 @@ impl Sandbox {
             .spawn()?;
 
         log::debug!("spawned");
+
         // Run command
         let time_start = std::time::Instant::now();
         let return_code = match child_exec.wait_timeout(time_limit)? {
             Some(status) => status.code(),
             _ => {
+                self.cur_cgroup[1].set_value("pids.max", 1)?;
                 log::debug!("Time Limit: {:?}, TLE", time_limit);
                 child_exec.kill()?;
                 child_exec.wait()?.code()
             }
         };
         let time_end = std::time::Instant::now();
+
+        // Kill all
+        self.cur_cgroup[1].set_value("pids.max", 1)?;
+        let current_pids = self.cur_cgroup[1].get_value::<String>("cgroup.procs")?;
+        for pid in current_pids.lines() {
+            log::debug!("Kill {}", pid);
+            nix::sys::signal::kill(
+                nix::unistd::Pid::from_raw(pid.parse::<i32>().unwrap()),
+                nix::sys::signal::Signal::SIGKILL,
+            )
+            .unwrap_or_else(|_err| log::error!("Failed to kill {}", pid));
+        }
 
         log::debug!("Return code: {:?}", return_code);
         log::debug!(
@@ -206,9 +224,7 @@ impl Sandbox {
         }
 
         // Calc Memory
-        let max_memory = self
-            .cur_cgroup
-            .get_value::<u64>("memory.memsw.max_usage_in_bytes")?;
+        let max_memory = self.cur_cgroup[0].get_value::<u64>("memory.memsw.max_usage_in_bytes")?;
         if max_memory > config.memory_limit {
             status = SandboxStatusKind::MemoryLimitExceeded;
         }
@@ -229,6 +245,7 @@ impl Sandbox {
         })
     } //}}}
     fn remove(&self) {
+        std::thread::sleep(std::time::Duration::from_millis(1000));
         log::info!("Remove Sandbox");
         // Umount rootfs
         let handle_err = |err| {
@@ -238,10 +255,10 @@ impl Sandbox {
         nix::mount::umount(OsStr::new(&self.sandbox_directory)).unwrap_or_else(handle_err);
 
         // Remove Directory
-        //let handle_err = |err| {
-        //    log::error!("Failed to remove sandbox: {}", err);
-        //};
-        //std::fs::remove_dir_all(&self.sandbox_directory).unwrap_or_else(handle_err);
+        let handle_err = |err| {
+            log::error!("Failed to remove sandbox: {}", err);
+        };
+        std::fs::remove_dir_all(&self.sandbox_directory).unwrap_or_else(handle_err);
         log::info!("Done!");
     }
 } //}}}
