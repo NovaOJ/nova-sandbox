@@ -1,28 +1,59 @@
-//! Nova Sandbox
-//!
-//! 一个致力用于 OJ/判题环境 的 Sandbox
 use std::error::Error;
-use std::ffi::OsStr;
 use std::os::unix::process::CommandExt;
 use std::process::Stdio;
 
-// use time::prelude::*;
-
-/// Sandbox 的配置
-#[derive(Debug)]
-pub struct SandboxConfig<'a> {
-    /// 时间限制（以 ms 为单位）
+pub struct SandboxConfig {
+    pub command: String,
     pub time_limit: u64,
-    /// 内存限制（以 Byte 为单位）
     pub memory_limit: u64,
-    pub pids_limit: u64,
-
-    /// 要执行的命令
-    pub command: &'a str,
-
+    pub pids_limit: u16,
     pub stdin: Stdio,
     pub stdout: Stdio,
     pub stderr: Stdio,
+}
+
+impl SandboxConfig {
+    fn gen(
+        time_limit: u64,
+        memory_limit: u64,
+        pids_limit: u16,
+        command: String,
+        stdin: Stdio,
+        stdout: Stdio,
+        stderr: Stdio,
+    ) -> SandboxConfig {
+        SandboxConfig {
+            time_limit: time_limit,
+            memory_limit: memory_limit,
+            pids_limit: pids_limit,
+            command: command,
+            stdin,
+            stdout,
+            stderr,
+        }
+    }
+}
+
+struct SandboxCgroup {
+    memory: cgroups_fs::AutomanagedCgroup,
+    pids: cgroups_fs::AutomanagedCgroup,
+}
+
+impl SandboxCgroup {
+    fn create(cgroup_name: &str) -> Result<SandboxCgroup, Box<dyn Error>> {
+        let cur_cgroup = cgroups_fs::CgroupName::new(cgroup_name);
+        Ok(SandboxCgroup {
+            memory: cgroups_fs::AutomanagedCgroup::init(&cur_cgroup, "memory")?,
+            pids: cgroups_fs::AutomanagedCgroup::init(&cur_cgroup, "pids")?,
+        })
+    }
+}
+
+pub struct Sandbox {
+    pub sandbox_directory: std::path::PathBuf,
+    work_directory: std::path::PathBuf,
+    rootfs_directory: std::path::PathBuf,
+    mounted: bool,
 }
 
 /// Sandbox 运行状态种类
@@ -51,72 +82,44 @@ pub struct SandboxStatus {
     pub return_code: i32,
 }
 
-pub struct Sandbox {
-    /// Sandbox ID
-    pub sandbox_id: String,
-
-    /// Rootfs 目录
-    pub rootfs_directory: std::path::PathBuf,
-    /// Work Directory  
-    /// 执行时只有这个目录是可写的  
-    /// Rootfs 是以**只读方式**挂载的  
-    /// 这个目录的父级应当和这个目录在同一文件系统内，否则无法启动沙箱
-    /// **Warn: 程序对这个目录有全部权限**
-    /// **Warn: Do not set "/tmp" value for this var**
-    pub work_directory: std::path::PathBuf,
-
-    /// 沙箱挂载点
-    sandbox_directory: std::path::PathBuf,
-    /// Cgroups
-    pub cur_cgroup: [cgroups_fs::AutomanagedCgroup; 2],
-}
-
 impl Sandbox {
-    //{{{
-    pub fn create<T, U>(rootfs_directory: T, work_directory: U) -> Result<Sandbox, Box<dyn Error>>
+    pub fn create<T, U, V>(
+        rootfs_directory: T,
+        work_directory: U,
+        sandbox_directory: V,
+    ) -> Result<Sandbox, Box<dyn Error>>
     where
         T: AsRef<std::path::Path>,
         U: AsRef<std::path::Path>,
+        V: AsRef<std::path::Path>,
     {
-        //{{{
         let sandbox_id = uuid::Uuid::new_v4().to_string();
         let rootfs_directory = std::path::PathBuf::from(rootfs_directory.as_ref());
         let work_directory = std::path::PathBuf::from(work_directory.as_ref());
-        let sandbox_directory = work_directory
-            .parent()
-            .unwrap()
-            .join(format!(".sandbox-{}", sandbox_id));
-        log::info!("Init Sandbox");
-        // Create && Check Directory
+        let sandbox_directory = std::path::PathBuf::from(sandbox_directory.as_ref());
+
+        let log_and_panic = |err: &str| -> Result<(), Box<dyn Error>> {
+            log::error!("{}", err);
+            return Err(String::from(err).into());
+        };
+
+        let check_directory = |directory: &std::path::PathBuf| -> Result<(), Box<dyn Error>> {
+            if directory.exists() == false {
+                log_and_panic(&format!("{:?} Not Found!", directory))?;
+            }
+            Ok(())
+        };
 
         // Check swapaccount
         if std::path::Path::new("/sys/fs/cgroup/memory/memory.memsw.usage_in_bytes").exists()
             == false
         {
-            log::error!("Need \"cgroup_enable=memory swapaccount=1\" kernel parameter");
-            return Err(String::from("Didn't have sawpaccount!").into());
+            log_and_panic("Need \"cgroup_enable=memory swapaccount=1\" kernel parameter")?;
         }
 
-        // Check
-        if rootfs_directory.exists() == false {
-            log::error!("Rootfs Directory isn't exist!");
-            return Err(String::from("Rootfs Directory isn't exists!").into());
-        }
-        if work_directory.exists() == false {
-            log::error!("Work Directory isn't exist!");
-            return Err(String::from("Work Directory isn't exists!").into());
-        }
-        if sandbox_directory.exists() == true {
-            log::error!("Sandbox Directory is exists");
-            return Err(String::from("Sandbox Directory is exists!").into());
-        }
-
-        // Create
-        std::fs::create_dir(&sandbox_directory)?;
-        if sandbox_directory.exists() == false {
-            log::error!("Sandbox Directory is exists");
-            return Err(String::from("Sandbox Directory is exists!").into());
-        }
+        check_directory(&rootfs_directory)?;
+        check_directory(&work_directory)?;
+        check_directory(&sandbox_directory)?;
 
         // Mount Directory
         let lower_dirs = [&rootfs_directory];
@@ -127,87 +130,58 @@ impl Sandbox {
             &sandbox_directory,
         )
         .mount()?;
-        log::info!("Done!");
-
-        // Create new cgroup
-        log::debug!("New cgroup {} create", sandbox_id);
-        let cur_cgroup = cgroups_fs::CgroupName::new(&sandbox_id);
-        let cur_cgroup = [
-            cgroups_fs::AutomanagedCgroup::init(&cur_cgroup, "memory")?,
-            cgroups_fs::AutomanagedCgroup::init(&cur_cgroup, "pids")?,
-        ];
 
         Ok(Sandbox {
-            sandbox_id,
-            cur_cgroup,
-            rootfs_directory,
             sandbox_directory,
             work_directory,
+            rootfs_directory,
+            mounted: true,
         })
-    } //}}}
-    pub fn exec(&self, config: SandboxConfig) -> Result<SandboxStatus, Box<dyn Error>> {
-        //{{{
+    }
+    pub fn run(&self, config: SandboxConfig) -> Result<SandboxStatus, Box<dyn Error>> {
         use cgroups_fs::CgroupsCommandExt;
         use wait_timeout::ChildExt;
+
+        // Set cgroup limit
+        let cgroup = SandboxCgroup::create(&uuid::Uuid::new_v4().to_string()).unwrap();
         let time_limit = std::time::Duration::from_millis(config.time_limit + 500);
         let mut status = SandboxStatusKind::Success;
+        cgroup
+            .memory
+            .set_value("memory.limit_in_bytes", config.memory_limit * 2)
+            .unwrap();
+        cgroup
+            .memory
+            .set_value("memory.memsw.limit_in_bytes", config.memory_limit * 2)
+            .unwrap();
+        cgroup
+            .pids
+            .set_value("pids.max", config.pids_limit)
+            .unwrap();
 
-        // Pre
-        log::debug!("Memory Limit {}", config.memory_limit * 2);
-        log::debug!("Pids Limit {}", config.memory_limit * 2);
-        self.cur_cgroup[0].set_value("memory.limit_in_bytes", config.memory_limit * 2)?;
-        self.cur_cgroup[0].set_value("memory.memsw.limit_in_bytes", config.memory_limit * 2)?;
-        self.cur_cgroup[1].set_value("pids.max", config.pids_limit)?;
-
-        log::info!(
-            "Chroot {:?} to run '{}'",
-            self.sandbox_directory,
-            config.command
-        );
+        // Create Child
         let mut child_exec = std::process::Command::new("bash")
             .args(&["-c", &config.command])
             .current_dir(&self.sandbox_directory)
-            .cgroups(&self.cur_cgroup)
+            .cgroups(&[&cgroup.memory, &cgroup.pids])
             .chroot(self.sandbox_directory.to_str().unwrap().to_string())
+            .setns(nix::sched::CloneFlags::CLONE_NEWPID)
             .stdin(config.stdin)
             .stdout(config.stdout)
             .stderr(config.stderr)
-            .spawn()?;
+            .spawn()
+            .unwrap();
 
-        log::debug!("spawned");
-
-        // Run command
         let time_start = std::time::Instant::now();
-        let return_code = match child_exec.wait_timeout(time_limit)? {
+        let return_code = match child_exec.wait_timeout(time_limit).unwrap() {
             Some(status) => status.code(),
             _ => {
-                self.cur_cgroup[1].set_value("pids.max", 1)?;
                 log::debug!("Time Limit: {:?}, TLE", time_limit);
-                child_exec.kill()?;
-                child_exec.wait()?.code()
+                child_exec.kill().unwrap();
+                child_exec.wait().unwrap().code()
             }
         };
         let time_end = std::time::Instant::now();
-
-        // Kill all
-        self.cur_cgroup[1].set_value("pids.max", 1)?;
-        let current_pids = self.cur_cgroup[1].get_value::<String>("cgroup.procs")?;
-        for pid in current_pids.lines() {
-            log::debug!("Kill {}", pid);
-            nix::sys::signal::kill(
-                nix::unistd::Pid::from_raw(pid.parse::<i32>().unwrap()),
-                nix::sys::signal::Signal::SIGKILL,
-            )
-            .unwrap_or_else(|_err| log::error!("Failed to kill {}", pid));
-        }
-
-        log::debug!("Return code: {:?}", return_code);
-        log::debug!(
-            "Start at {:?}, End at {:?}, Use at {:?}",
-            time_start,
-            time_end,
-            time_end - time_start
-        );
 
         // Get return code
         let return_code = match return_code {
@@ -224,7 +198,9 @@ impl Sandbox {
         }
 
         // Calc Memory
-        let max_memory = self.cur_cgroup[0].get_value::<u64>("memory.memsw.max_usage_in_bytes")?;
+        let max_memory = cgroup
+            .memory
+            .get_value::<u64>("memory.memsw.max_usage_in_bytes")?;
         if max_memory > config.memory_limit {
             status = SandboxStatusKind::MemoryLimitExceeded;
         }
@@ -236,49 +212,26 @@ impl Sandbox {
             status = SandboxStatusKind::TimeLimitExceeded;
         }
         let used_time = used_time.as_millis();
-
         Ok(SandboxStatus {
             status,
             max_memory,
             used_time,
             return_code,
         })
-    } //}}}
-    fn remove(&self) {
-        std::thread::sleep(std::time::Duration::from_millis(1000));
-        log::info!("Remove Sandbox");
-        // Umount rootfs
-        let handle_err = |err| {
-            log::error!("Failed to umount sandbox: {}", err);
-        };
-
-        nix::mount::umount(OsStr::new(&self.sandbox_directory)).unwrap_or_else(handle_err);
-
-        // Remove Directory
-        let handle_err = |err| {
-            log::error!("Failed to remove sandbox: {}", err);
-        };
-        std::fs::remove_dir_all(&self.sandbox_directory).unwrap_or_else(handle_err);
-        log::info!("Done!");
-    }
-} //}}}
-
-impl Drop for Sandbox {
-    fn drop(&mut self) {
-        self.remove();
     }
 }
 
 pub trait SandboxCommandExt {
     fn chroot(&mut self, dir: String) -> &mut Self;
     fn chdir(&mut self, dir: String) -> &mut Self;
+    fn setns(&mut self, nsflag: nix::sched::CloneFlags) -> &mut Self;
 }
 
 impl SandboxCommandExt for std::process::Command {
     /// 用于 Command 执行前 Chroot 进入沙箱  
     /// 应该在所有需要修改/读取 sysfs/procfs 的函数之后使用
     fn chroot(&mut self, dir: String) -> &mut Self {
-        log::debug!("Chroot to {}", dir);
+        use std::ffi::OsStr;
         unsafe {
             self.pre_exec(move || {
                 nix::unistd::chroot(OsStr::new(&dir)).unwrap();
@@ -289,9 +242,19 @@ impl SandboxCommandExt for std::process::Command {
     /// 用于在 Chroot 之后确定目录  
     /// 应在 `SandboxCommandExt::chroot()` 后使用
     fn chdir(&mut self, dir: String) -> &mut Self {
+        use std::ffi::OsStr;
+        log::debug!("Chroot to {}", dir);
         unsafe {
             self.pre_exec(move || {
                 nix::unistd::chdir(OsStr::new(&dir)).unwrap();
+                Ok(())
+            })
+        }
+    }
+    fn setns(&mut self, nsflags: nix::sched::CloneFlags) -> &mut Self {
+        unsafe {
+            self.pre_exec(move || {
+                nix::sched::setns(std::process::id() as i32, nsflags).unwrap();
                 Ok(())
             })
         }
