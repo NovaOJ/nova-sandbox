@@ -148,16 +148,11 @@ impl Sandbox {
         let mut status = SandboxStatusKind::Success;
         cgroup
             .memory
-            .set_value("memory.limit_in_bytes", config.memory_limit * 2)
-            .unwrap();
+            .set_value("memory.limit_in_bytes", config.memory_limit * 2)?;
         cgroup
             .memory
-            .set_value("memory.memsw.limit_in_bytes", config.memory_limit * 2)
-            .unwrap();
-        cgroup
-            .pids
-            .set_value("pids.max", config.pids_limit)
-            .unwrap();
+            .set_value("memory.memsw.limit_in_bytes", config.memory_limit * 2)?;
+        cgroup.pids.set_value("pids.max", config.pids_limit)?;
 
         // Create Child
         let mut child_exec = std::process::Command::new("bash")
@@ -169,16 +164,15 @@ impl Sandbox {
             .stdin(config.stdin)
             .stdout(config.stdout)
             .stderr(config.stderr)
-            .spawn()
-            .unwrap();
+            .spawn()?;
 
         let time_start = std::time::Instant::now();
-        let return_code = match child_exec.wait_timeout(time_limit).unwrap() {
+        let return_code = match child_exec.wait_timeout(time_limit)? {
             Some(status) => status.code(),
             _ => {
                 log::debug!("Time Limit: {:?}, TLE", time_limit);
-                child_exec.kill().unwrap();
-                child_exec.wait().unwrap().code()
+                child_exec.kill()?;
+                child_exec.wait()?.code()
             }
         };
         let time_end = std::time::Instant::now();
@@ -219,12 +213,26 @@ impl Sandbox {
             return_code,
         })
     }
+    fn remove(&self) {
+        use std::ffi::OsStr;
+        log::info!("Remove sandbox on {:?}", &self.sandbox_directory);
+        nix::mount::umount(OsStr::new(&self.sandbox_directory))
+            .unwrap_or_else(|err| log::error!("Failed to umount :{}", err));
+        std::fs::remove_dir_all(&self.sandbox_directory)
+            .unwrap_or_else(|err| log::error!("Failed to remove :{}", err));
+    }
+}
+
+impl Drop for Sandbox {
+    fn drop(&mut self) {
+        self.remove();
+    }
 }
 
 pub trait SandboxCommandExt {
     fn chroot(&mut self, dir: String) -> &mut Self;
     fn chdir(&mut self, dir: String) -> &mut Self;
-    fn setns(&mut self, nsflag: nix::sched::CloneFlags) -> &mut Self;
+    fn setns(&mut self, nsflags: nix::sched::CloneFlags) -> &mut Self;
 }
 
 impl SandboxCommandExt for std::process::Command {
@@ -232,6 +240,7 @@ impl SandboxCommandExt for std::process::Command {
     /// 应该在所有需要修改/读取 sysfs/procfs 的函数之后使用
     fn chroot(&mut self, dir: String) -> &mut Self {
         use std::ffi::OsStr;
+        log::debug!("Chroot to {}", dir);
         unsafe {
             self.pre_exec(move || {
                 nix::unistd::chroot(OsStr::new(&dir)).unwrap();
@@ -243,7 +252,6 @@ impl SandboxCommandExt for std::process::Command {
     /// 应在 `SandboxCommandExt::chroot()` 后使用
     fn chdir(&mut self, dir: String) -> &mut Self {
         use std::ffi::OsStr;
-        log::debug!("Chroot to {}", dir);
         unsafe {
             self.pre_exec(move || {
                 nix::unistd::chdir(OsStr::new(&dir)).unwrap();
