@@ -13,8 +13,8 @@ fn test_pid() {
     let config = SandboxConfig::create(
         1000,
         10 * 1024 * 1024,
-        1,
-        ":(){ echo $$; :|:& };:".to_string(),
+        2,
+        ":(){ :|:& };:".to_string(),
         Stdio::inherit(),
         Stdio::inherit(),
         Stdio::inherit(),
