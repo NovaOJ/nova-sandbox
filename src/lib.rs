@@ -13,7 +13,7 @@ pub struct SandboxConfig {
 }
 
 impl SandboxConfig {
-    pub fn create(
+    pub fn new(
         time_limit: u64,
         memory_limit: u64,
         pids_limit: u16,
@@ -35,17 +35,54 @@ impl SandboxConfig {
 }
 
 struct SandboxCgroup {
+    freezer: cgroups_fs::AutomanagedCgroup,
     memory: cgroups_fs::AutomanagedCgroup,
     pids: cgroups_fs::AutomanagedCgroup,
 }
 
 impl SandboxCgroup {
-    fn create(cgroup_name: &str) -> Result<SandboxCgroup, Box<dyn Error>> {
+    fn new(cgroup_name: &str) -> Result<SandboxCgroup, Box<dyn Error>> {
         let cur_cgroup = cgroups_fs::CgroupName::new(cgroup_name);
         Ok(SandboxCgroup {
             memory: cgroups_fs::AutomanagedCgroup::init(&cur_cgroup, "memory")?,
             pids: cgroups_fs::AutomanagedCgroup::init(&cur_cgroup, "pids")?,
+            freezer: cgroups_fs::AutomanagedCgroup::init(&cur_cgroup, "freezer")?,
         })
+    }
+    pub fn kill_all_tasks(&self, timeout: std::time::Duration) -> Result<(), Box<dyn Error>> {
+        let freezer = &self.freezer;
+        let is_empty = || -> Result<bool, Box<dyn Error>> { Ok(freezer.get_tasks()?.is_empty()) };
+        let delay = std::time::Duration::from_micros(100);
+        let mut timeout = timeout;
+
+        log::info!("Try kill all in cgroup {:?}", &freezer);
+        log::trace!("Current task list {:?}", freezer.get_tasks()?);
+
+        if is_empty()? == true {
+            return Ok(());
+        };
+
+        freezer.set_value::<&str>("freezer.state", "FROZEN")?;
+
+        while timeout > std::time::Duration::from_micros(0) {
+            if freezer.get_value::<String>("freezer.state")? == "FROZEN" {
+                break;
+            }
+            std::thread::sleep(delay);
+            timeout -= delay;
+        }
+        freezer.send_signal_to_all_tasks(nix::sys::signal::Signal::SIGKILL)?;
+
+        freezer.set_value::<&str>("freezer.state", "THAWED")?;
+        while timeout > std::time::Duration::from_micros(0) {
+            if is_empty()? == true {
+                break;
+            }
+            std::thread::sleep(delay);
+            timeout -= delay;
+        }
+
+        Ok(())
     }
 }
 
@@ -84,7 +121,7 @@ pub struct SandboxStatus {
 }
 
 impl Sandbox {
-    pub fn create<T, U, V>(
+    pub fn new<T, U, V>(
         rootfs_directory: T,
         work_directory: U,
         sandbox_directory: V,
@@ -144,10 +181,9 @@ impl Sandbox {
         use wait_timeout::ChildExt;
 
         // Set cgroup limit
-        let cgroup = SandboxCgroup::create(&uuid::Uuid::new_v4().to_string()).unwrap();
+        let cgroup = SandboxCgroup::new(&uuid::Uuid::new_v4().to_string()).unwrap();
         let time_limit = std::time::Duration::from_millis(config.time_limit + 500);
         let mut status = SandboxStatusKind::Success;
-        // TODO: Add freezer cgroup
         cgroup
             .memory
             .set_value("memory.limit_in_bytes", config.memory_limit * 2)?;
@@ -169,6 +205,7 @@ impl Sandbox {
             .spawn()?;
 
         // TODO: Change count time to use cpuacct
+        // TODO: Let timeout checker to check cgroup task number
         let time_start = std::time::Instant::now();
         let return_code = match child_exec.wait_timeout(time_limit)? {
             Some(status) => status.code(),
@@ -179,6 +216,8 @@ impl Sandbox {
             }
         };
         let time_end = std::time::Instant::now();
+
+        cgroup.kill_all_tasks(std::time::Duration::from_micros(1000))?;
 
         // Get return code
         let return_code = match return_code {
