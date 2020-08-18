@@ -147,13 +147,14 @@ impl Sandbox {
         let cgroup = SandboxCgroup::create(&uuid::Uuid::new_v4().to_string()).unwrap();
         let time_limit = std::time::Duration::from_millis(config.time_limit + 500);
         let mut status = SandboxStatusKind::Success;
+        // TODO: Add freezer cgroup
         cgroup
             .memory
             .set_value("memory.limit_in_bytes", config.memory_limit * 2)?;
         cgroup
             .memory
             .set_value("memory.memsw.limit_in_bytes", config.memory_limit * 2)?;
-        cgroup.pids.set_value("pids.max", config.pids_limit)?;
+        cgroup.pids.set_value("pids.max", config.pids_limit + 1)?;
 
         // Create Child
         let mut child_exec = std::process::Command::new("bash")
@@ -167,6 +168,7 @@ impl Sandbox {
             .stderr(config.stderr)
             .spawn()?;
 
+        // TODO: Change count time to use cpuacct
         let time_start = std::time::Instant::now();
         let return_code = match child_exec.wait_timeout(time_limit)? {
             Some(status) => status.code(),
@@ -214,12 +216,17 @@ impl Sandbox {
             return_code,
         })
     }
-    fn remove(&self) {
+    fn remove(&mut self) {
         // TODO: Remove mounted flag.
         use std::ffi::OsStr;
+        if self.mounted == false {
+            log::warn!("Try to remove an umounted sandbox");
+            return;
+        }
         log::info!("Remove sandbox on {:?}", &self);
         nix::mount::umount(OsStr::new(&self.sandbox_directory))
             .unwrap_or_else(|err| log::error!("Failed to umount :{}", err));
+        self.mounted = false;
         //        std::fs::remove_dir_all(&self.sandbox_directory)
         //            .unwrap_or_else(|err| log::error!("Failed to remove :{}", err));
     }
