@@ -13,7 +13,7 @@ pub struct SandboxConfig {
 }
 
 impl SandboxConfig {
-    fn gen(
+    pub fn create(
         time_limit: u64,
         memory_limit: u64,
         pids_limit: u16,
@@ -49,6 +49,7 @@ impl SandboxCgroup {
     }
 }
 
+#[derive(Debug)]
 pub struct Sandbox {
     pub sandbox_directory: std::path::PathBuf,
     work_directory: std::path::PathBuf,
@@ -214,17 +215,19 @@ impl Sandbox {
         })
     }
     fn remove(&self) {
+        // TODO: Remove mounted flag.
         use std::ffi::OsStr;
-        log::info!("Remove sandbox on {:?}", &self.sandbox_directory);
+        log::info!("Remove sandbox on {:?}", &self);
         nix::mount::umount(OsStr::new(&self.sandbox_directory))
             .unwrap_or_else(|err| log::error!("Failed to umount :{}", err));
-        std::fs::remove_dir_all(&self.sandbox_directory)
-            .unwrap_or_else(|err| log::error!("Failed to remove :{}", err));
+        //        std::fs::remove_dir_all(&self.sandbox_directory)
+        //            .unwrap_or_else(|err| log::error!("Failed to remove :{}", err));
     }
 }
 
 impl Drop for Sandbox {
     fn drop(&mut self) {
+        log::trace!("DROP {:?}", self);
         self.remove();
     }
 }
@@ -262,7 +265,15 @@ impl SandboxCommandExt for std::process::Command {
     fn setns(&mut self, nsflags: nix::sched::CloneFlags) -> &mut Self {
         unsafe {
             self.pre_exec(move || {
-                nix::sched::setns(std::process::id() as i32, nsflags).unwrap();
+                nix::sched::unshare(nsflags).unwrap();
+                match nix::unistd::fork() {
+                    Ok(nix::unistd::ForkResult::Child) => log::trace!("forked!"),
+                    Err(_) => log::error!("Fork error!"),
+                    Ok(nix::unistd::ForkResult::Parent { child, .. }) => {
+                        nix::sys::wait::waitpid(child, None).unwrap();
+                        std::process::exit(0);
+                    }
+                };
                 Ok(())
             })
         }
