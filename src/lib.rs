@@ -38,8 +38,10 @@ struct SandboxCgroup {
     freezer: cgroups_fs::AutomanagedCgroup,
     memory: cgroups_fs::AutomanagedCgroup,
     pids: cgroups_fs::AutomanagedCgroup,
+    cpuacct: cgroups_fs::AutomanagedCgroup,
 }
 
+// TODO: use impl to set/get cgroup value
 impl SandboxCgroup {
     fn new(cgroup_name: &str) -> Result<SandboxCgroup, Box<dyn Error>> {
         let cur_cgroup = cgroups_fs::CgroupName::new(cgroup_name);
@@ -47,18 +49,26 @@ impl SandboxCgroup {
             memory: cgroups_fs::AutomanagedCgroup::init(&cur_cgroup, "memory")?,
             pids: cgroups_fs::AutomanagedCgroup::init(&cur_cgroup, "pids")?,
             freezer: cgroups_fs::AutomanagedCgroup::init(&cur_cgroup, "freezer")?,
+            cpuacct: cgroups_fs::AutomanagedCgroup::init(&cur_cgroup, "cpuacct")?,
         })
+    }
+    pub fn is_empty(&self) -> Result<bool, Box<dyn Error>> {
+        Ok(self.freezer.get_tasks()?.is_empty())
+    }
+    pub fn get_cpu_time(&self) -> Result<std::time::Duration, Box<dyn Error>> {
+        Ok(std::time::Duration::from_nanos(
+            self.cpuacct.get_value::<u64>("cpuacct.usage_user")?,
+        ))
     }
     pub fn kill_all_tasks(&self, timeout: std::time::Duration) -> Result<(), Box<dyn Error>> {
         let freezer = &self.freezer;
-        let is_empty = || -> Result<bool, Box<dyn Error>> { Ok(freezer.get_tasks()?.is_empty()) };
         let delay = std::time::Duration::from_micros(100);
         let mut timeout = timeout;
 
         log::info!("Try kill all in cgroup {:?}", &freezer);
         log::trace!("Current task list {:?}", freezer.get_tasks()?);
 
-        if is_empty()? == true {
+        if self.is_empty()? == true {
             return Ok(());
         };
 
@@ -75,14 +85,14 @@ impl SandboxCgroup {
 
         freezer.set_value::<&str>("freezer.state", "THAWED")?;
         while timeout > std::time::Duration::from_micros(0) {
-            if is_empty()? == true {
-                break;
+            if self.is_empty()? == true {
+                return Ok(());
             }
             std::thread::sleep(delay);
             timeout -= delay;
         }
 
-        Ok(())
+        Err("Failed to kill all tasks".to_string().into())
     }
 }
 
@@ -131,7 +141,6 @@ impl Sandbox {
         U: AsRef<std::path::Path>,
         V: AsRef<std::path::Path>,
     {
-        let sandbox_id = uuid::Uuid::new_v4().to_string();
         let rootfs_directory = std::path::PathBuf::from(rootfs_directory.as_ref());
         let work_directory = std::path::PathBuf::from(work_directory.as_ref());
         let sandbox_directory = std::path::PathBuf::from(sandbox_directory.as_ref());
@@ -178,48 +187,92 @@ impl Sandbox {
     }
     pub fn run(&self, config: SandboxConfig) -> Result<SandboxStatus, Box<dyn Error>> {
         use cgroups_fs::CgroupsCommandExt;
+        use std::time::Duration;
         use wait_timeout::ChildExt;
 
         // Set cgroup limit
         let cgroup = SandboxCgroup::new(&uuid::Uuid::new_v4().to_string()).unwrap();
-        let time_limit = std::time::Duration::from_millis(config.time_limit + 500);
+        let time_limit = Duration::from_millis(config.time_limit + 500);
         let mut status = SandboxStatusKind::Success;
+        let mut used_time = time_limit;
+        // TODO: Set cgroup init
         cgroup
             .memory
             .set_value("memory.limit_in_bytes", config.memory_limit * 2)?;
         cgroup
             .memory
             .set_value("memory.memsw.limit_in_bytes", config.memory_limit * 2)?;
-        cgroup.pids.set_value("pids.max", config.pids_limit + 1)?;
+        cgroup.pids.set_value("pids.max", config.pids_limit)?;
 
-        // Create Child
-        let mut child_exec = std::process::Command::new("bash")
-            .args(&["-c", &config.command])
-            .current_dir(&self.sandbox_directory)
-            .cgroups(&[&cgroup.memory, &cgroup.pids])
-            .chroot(self.sandbox_directory.to_str().unwrap().to_string())
-            .setns(nix::sched::CloneFlags::CLONE_NEWPID)
-            .stdin(config.stdin)
-            .stdout(config.stdout)
-            .stderr(config.stderr)
-            .spawn()?;
+        let mut return_code = Some(0);
+        match nix::unistd::fork() {
+            Err(_) => log::error!("Fork error!"),
+            Ok(nix::unistd::ForkResult::Child) => {
+                log::trace!("forked!");
+                nix::sched::unshare(nix::sched::CloneFlags::CLONE_NEWPID).unwrap();
+                // Create Child
+                let mut child_exec = std::process::Command::new("bash")
+                    .args(&["-c", &config.command])
+                    .current_dir(&self.sandbox_directory)
+                    .cgroups(&[
+                        &cgroup.memory,
+                        &cgroup.pids,
+                        &cgroup.freezer,
+                        &cgroup.cpuacct,
+                    ])
+                    .chroot(self.sandbox_directory.to_str().unwrap().to_string())
+                    .stdin(config.stdin)
+                    .stdout(config.stdout)
+                    .stderr(config.stderr)
+                    .spawn()
+                    .unwrap();
+                let return_code = match child_exec.wait_timeout(time_limit).unwrap() {
+                    Some(status) => status.code(),
+                    _ => {
+                        log::debug!("Time Limit: {:?}, TLE", time_limit);
+                        child_exec.kill().unwrap();
+                        child_exec.wait().unwrap().code()
+                    }
+                };
+                log::debug!("forked: {:?}", return_code);
+                std::process::exit(return_code.unwrap_or_else(|| -1));
+            }
+            Ok(nix::unistd::ForkResult::Parent { child, .. }) => {
+                use nix::sys::wait::WaitStatus::Exited;
+                let mut timeout = time_limit;
+                let delay = Duration::from_millis(500);
+                let zero_time = Duration::from_millis(0);
 
-        // TODO: Change count time to use cpuacct
-        // TODO: Let timeout checker to check cgroup task number
-        let time_start = std::time::Instant::now();
-        let return_code = match child_exec.wait_timeout(time_limit)? {
-            Some(status) => status.code(),
-            _ => {
-                log::debug!("Time Limit: {:?}, TLE", time_limit);
-                child_exec.kill()?;
-                child_exec.wait()?.code()
+                // Wait for child task start
+                std::thread::sleep(delay);
+
+                // Look up until timeout or no task in cgroup
+                while timeout > zero_time {
+                    return_code = match nix::sys::wait::waitpid(child, None)? {
+                        Exited(_pid, status) => Some(status),
+                        _ => None,
+                    };
+                    log::trace!("{:?}", return_code);
+                    if cgroup.is_empty()? == true && return_code.is_some() == true {
+                        break;
+                    }
+                    std::thread::sleep(delay);
+                    timeout -= delay;
+                    log::trace!("less time {:?}", timeout);
+                }
+
+                used_time = cgroup.get_cpu_time()?;
             }
         };
-        let time_end = std::time::Instant::now();
 
-        cgroup.kill_all_tasks(std::time::Duration::from_micros(1000))?;
+        cgroup
+            .kill_all_tasks(std::time::Duration::from_micros(1000))
+            .unwrap_or_else(|err| {
+                log::warn!("{}", err);
+            });
 
         // Get return code
+        log::debug!("{:?}", return_code);
         let return_code = match return_code {
             // Rust Crashes
             Some(101) => {
@@ -242,7 +295,6 @@ impl Sandbox {
         }
 
         // Calc time
-        let used_time = time_end - time_start;
         log::debug!("{:?}", used_time);
         if used_time > std::time::Duration::from_millis(config.time_limit) {
             status = SandboxStatusKind::TimeLimitExceeded;
@@ -281,7 +333,7 @@ impl Drop for Sandbox {
 pub trait SandboxCommandExt {
     fn chroot(&mut self, dir: String) -> &mut Self;
     fn chdir(&mut self, dir: String) -> &mut Self;
-    fn setns(&mut self, nsflags: nix::sched::CloneFlags) -> &mut Self;
+    //fn setns(&mut self, nsflags: nix::sched::CloneFlags) -> &mut Self;
 }
 
 impl SandboxCommandExt for std::process::Command {
@@ -308,20 +360,19 @@ impl SandboxCommandExt for std::process::Command {
             })
         }
     }
-    fn setns(&mut self, nsflags: nix::sched::CloneFlags) -> &mut Self {
-        unsafe {
-            self.pre_exec(move || {
-                nix::sched::unshare(nsflags).unwrap();
-                match nix::unistd::fork() {
-                    Ok(nix::unistd::ForkResult::Child) => log::trace!("forked!"),
-                    Err(_) => log::error!("Fork error!"),
-                    Ok(nix::unistd::ForkResult::Parent { child, .. }) => {
-                        nix::sys::wait::waitpid(child, None).unwrap();
-                        std::process::exit(0);
-                    }
-                };
-                Ok(())
-            })
-        }
-    }
+    //    fn setns(&mut self, nsflags: nix::sched::CloneFlags) -> &mut Self {
+    //        unsafe {
+    //            self.pre_exec(move || {
+    //                match nix::unistd::fork() {
+    //                    Ok(nix::unistd::ForkResult::Child) => log::trace!("forked!"),
+    //                    Err(_) => log::error!("Fork error!"),
+    //                    Ok(nix::unistd::ForkResult::Parent { child, .. }) => {
+    //                        nix::sys::wait::waitpid(child, None).unwrap();
+    //                        std::process::exit(0);
+    //                    }
+    //                };
+    //                Ok(())
+    //            })
+    //        }
+    //    }
 }
