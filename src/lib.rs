@@ -44,12 +44,13 @@ struct SandboxCgroup {
 // TODO: use impl to set/get cgroup value
 impl SandboxCgroup {
     fn new(cgroup_name: &str) -> Result<SandboxCgroup, Box<dyn Error>> {
-        let cur_cgroup = cgroups_fs::CgroupName::new(cgroup_name);
+        use cgroups_fs::*;
+        let cur_cgroup = CgroupName::new(cgroup_name);
         Ok(SandboxCgroup {
-            memory: cgroups_fs::AutomanagedCgroup::init(&cur_cgroup, "memory")?,
-            pids: cgroups_fs::AutomanagedCgroup::init(&cur_cgroup, "pids")?,
-            freezer: cgroups_fs::AutomanagedCgroup::init(&cur_cgroup, "freezer")?,
-            cpuacct: cgroups_fs::AutomanagedCgroup::init(&cur_cgroup, "cpuacct")?,
+            memory: AutomanagedCgroup::init(&cur_cgroup, "memory")?,
+            pids: AutomanagedCgroup::init(&cur_cgroup, "pids")?,
+            freezer: AutomanagedCgroup::init(&cur_cgroup, "freezer")?,
+            cpuacct: AutomanagedCgroup::init(&cur_cgroup, "cpuacct")?,
         })
     }
     pub fn is_empty(&self) -> Result<bool, Box<dyn Error>> {
@@ -57,7 +58,7 @@ impl SandboxCgroup {
     }
     pub fn get_cpu_time(&self) -> Result<std::time::Duration, Box<dyn Error>> {
         Ok(std::time::Duration::from_nanos(
-            self.cpuacct.get_value::<u64>("cpuacct.usage_user")?,
+            self.cpuacct.get_value::<u64>("cpuacct.usage")?,
         ))
     }
     pub fn kill_all_tasks(&self, timeout: std::time::Duration) -> Result<(), Box<dyn Error>> {
@@ -226,6 +227,7 @@ impl Sandbox {
                     .stderr(config.stderr)
                     .spawn()
                     .unwrap();
+
                 let return_code = match child_exec.wait_timeout(time_limit).unwrap() {
                     Some(status) => status.code(),
                     _ => {
