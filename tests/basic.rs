@@ -1,36 +1,48 @@
 use nova_sandbox::*;
-use std::fs;
-use std::process::Stdio;
+
+mod common;
 
 #[test]
-fn test_pid() {
+fn hello_world() {
     pretty_env_logger::init();
-    let work_directory = format!("/tmp/{}", uuid::Uuid::new_v4().to_string());
-    let sandbox_directory = format!("/tmp/{}", uuid::Uuid::new_v4().to_string());
-    fs::create_dir(&work_directory).unwrap();
-    fs::create_dir(&sandbox_directory).unwrap();
+    let status = common::run_sandbox("echo 'Hello, World!'");
+    log::debug!("{:?}", status);
+    if let SandboxStatusKind::Success = status.status {
+        log::info!("Test success");
+    } else {
+        panic!("Wrong return type!");
+    }
+}
 
-    let sandbox = Sandbox::new(
-        "/work/package/debs/debian-rootfs",
-        &work_directory,
-        &sandbox_directory,
-    )
-    .unwrap();
+#[test]
+fn time_limit() {
+    let status = common::run_sandbox("sleep 2");
+    log::debug!("{:?}", status);
+    if let SandboxStatusKind::TimeLimitExceeded = status.status {
+        log::info!("Test success");
+    } else {
+        panic!("Wrong return type!");
+    }
+}
 
-    let config = SandboxConfig::new(
-        1000,
-        512 * 1024 * 1024,
-        1,
-        "echo 'Hello, World'".to_string(),
-        //"for i in $(seq 1 1000000000); do echo $i; done".to_string(),
-        //"sleep 2".to_string(),
-        Stdio::inherit(),
-        Stdio::inherit(),
-        Stdio::inherit(),
-    );
-    println!("{:?}", sandbox.run(config).unwrap());
+#[test]
+fn memory_limit() {
+    let status = common::run_sandbox("for i in $(seq 1 10000000000); do echo $i; done;");
+    log::debug!("{:?}", status);
+    if let SandboxStatusKind::MemoryLimitExceeded = status.status {
+        log::info!("Test success");
+    } else {
+        panic!("Wrong return type!");
+    }
+}
 
-    drop(sandbox);
-    fs::remove_dir_all(work_directory).unwrap();
-    fs::remove_dir_all(sandbox_directory).unwrap();
+#[test]
+fn run_time() {
+    let status = common::run_sandbox("exit -1");
+    log::debug!("{:?}", status);
+    if let SandboxStatusKind::RuntimeError = status.status {
+        log::info!("Test success");
+    } else {
+        panic!("Wrong return type!");
+    }
 }

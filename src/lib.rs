@@ -13,20 +13,23 @@ pub struct SandboxConfig {
 }
 
 impl SandboxConfig {
-    pub fn new(
+    pub fn new<T>(
         time_limit: u64,
         memory_limit: u64,
         pids_limit: u16,
-        command: String,
+        command: T,
         stdin: Stdio,
         stdout: Stdio,
         stderr: Stdio,
-    ) -> SandboxConfig {
+    ) -> SandboxConfig
+    where
+        T: std::fmt::Display,
+    {
         SandboxConfig {
             time_limit: time_limit,
             memory_limit: memory_limit,
             pids_limit: pids_limit,
-            command: command,
+            command: command.to_string(),
             stdin,
             stdout,
             stderr,
