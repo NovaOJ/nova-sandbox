@@ -20,14 +20,15 @@ fn test_pid() {
     let config = SandboxConfig::new(
         1000,
         512 * 1024 * 1024,
-        10,
+        1,
         "echo 'Hello, World'".to_string(),
         //"for i in $(seq 1 1000000000); do echo $i; done".to_string(),
+        //"sleep 2".to_string(),
         Stdio::inherit(),
         Stdio::inherit(),
         Stdio::inherit(),
     );
-    log::debug!("{:?}", sandbox.run(config).unwrap());
+    println!("{:?}", sandbox.run(config).unwrap());
 
     drop(sandbox);
     fs::remove_dir_all(work_directory).unwrap();
