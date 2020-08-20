@@ -5,7 +5,8 @@
 - [x] Add swap used when calc memory used
 - [x] Change to `libmount`
 - [x] Try to use overlayfs
-- [ ] mountpoint
+- [x] mountpoint
 - [x] try to use `wait_timeout`
-- [ ] Rewrite test
-- [ ] Add option
+- [x] Rewrite test
+- [x] Add option
+- [ ] Add bin
