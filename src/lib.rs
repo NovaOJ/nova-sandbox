@@ -2,10 +2,15 @@ use std::error::Error;
 use std::os::unix::process::CommandExt;
 use std::process::Stdio;
 
+/// Sandbox 运行配置
 pub struct SandboxConfig {
+    /// 将要执行的命令 bash
     pub command: String,
+    /// 时间限制（以 ms 为单位）
     pub time_limit: u64,
+    /// 内存限制（以 bytes 为单位）
     pub memory_limit: u64,
+    /// Pid 限制
     pub pids_limit: u16,
     pub stdin: Stdio,
     pub stdout: Stdio,
@@ -13,6 +18,9 @@ pub struct SandboxConfig {
 }
 
 impl SandboxConfig {
+    /// 创建一个新的 Config
+    ///
+    /// 参数含义见 [SandboxConfig](struct.SandboxConfig.html)
     pub fn new<T>(
         time_limit: u64,
         memory_limit: u64,
@@ -37,6 +45,7 @@ impl SandboxConfig {
     }
 }
 
+/// 用于限制 Sandbox 的资源使用的 cgroup
 struct SandboxCgroup {
     freezer: cgroups_fs::AutomanagedCgroup,
     memory: cgroups_fs::AutomanagedCgroup,
@@ -44,8 +53,8 @@ struct SandboxCgroup {
     cpuacct: cgroups_fs::AutomanagedCgroup,
 }
 
-// TODO: use impl to set/get cgroup value
 impl SandboxCgroup {
+    /// 新建一个 Sandbox 组
     fn new(cgroup_name: &str) -> Result<SandboxCgroup, Box<dyn Error>> {
         use cgroups_fs::*;
         let cur_cgroup = CgroupName::new(cgroup_name);
@@ -56,20 +65,24 @@ impl SandboxCgroup {
             cpuacct: AutomanagedCgroup::init(&cur_cgroup, "cpuacct")?,
         })
     }
+    /// 返回 cgroup 内是否还有进程
     pub fn is_empty(&self) -> Result<bool, Box<dyn Error>> {
         log::trace!("Current task list: {:?}", self.freezer.get_tasks()?);
         Ok(self.freezer.get_tasks()?.is_empty())
     }
+    /// 获取运行所消耗的 CPU 时间
     pub fn get_cpu_time(&self) -> Result<std::time::Duration, Box<dyn Error>> {
         Ok(std::time::Duration::from_nanos(
             self.cpuacct.get_value::<u64>("cpuacct.usage")?,
         ))
     }
+    /// 获取最大的内存占用
     pub fn get_max_memory(&self) -> Result<u64, Box<dyn Error>> {
         Ok(self
             .memory
             .get_value::<u64>("memory.memsw.max_usage_in_bytes")?)
     }
+    /// 将所有统计还原
     pub fn clear(&self) -> Result<(), Box<dyn Error>> {
         self.memory
             .set_value("memory.memsw.max_usage_in_bytes", 0)?;
@@ -77,6 +90,7 @@ impl SandboxCgroup {
 
         Ok(())
     }
+    /// 设置内存限制
     pub fn set_memory_limit(&self, memory_limit: u64) -> Result<(), Box<dyn Error>> {
         self.memory
             .set_value("memory.limit_in_bytes", memory_limit * 2)?;
@@ -85,11 +99,15 @@ impl SandboxCgroup {
 
         Ok(())
     }
+    /// 设置 Pid 限制
     pub fn set_pids_limit(&self, pids_limit: u16) -> Result<(), Box<dyn Error>> {
         self.pids.set_value("pids.max", pids_limit)?;
 
         Ok(())
     }
+    /// 杀死 cgroup 内所有进程
+    ///
+    /// 先通过 freezer cgroup 冻结，然后发送 kill 指令
     pub fn kill_all_tasks(&self, timeout: std::time::Duration) -> Result<(), Box<dyn Error>> {
         let freezer = &self.freezer;
         let delay = std::time::Duration::from_millis(100);
@@ -128,11 +146,16 @@ impl SandboxCgroup {
     }
 }
 
+/// 沙箱
 #[derive(Debug)]
 pub struct Sandbox {
+    /// Sandbox 的挂载点
     pub sandbox_directory: std::path::PathBuf,
+    /// Sandbox 的 work_dir，这个文件夹里的数据会覆盖 rootfs 目录里的数据，然后在挂载点形成一个新的 Rootfs
     work_directory: std::path::PathBuf,
+    /// Rootfs 的目录
     rootfs_directory: std::path::PathBuf,
+    /// 是否已挂载
     mounted: bool,
 }
 
@@ -163,6 +186,9 @@ pub struct SandboxStatus {
 }
 
 impl Sandbox {
+    /// 新建沙箱
+    ///
+    /// 参数含义见 [Sandbox](struct.Sandbox.html)
     pub fn new<T, U, V>(
         rootfs_directory: T,
         work_directory: U,
@@ -217,6 +243,7 @@ impl Sandbox {
             mounted: true,
         })
     }
+    /// 通过 SandboxConfig 在沙箱里执行命令
     pub fn run(&self, config: SandboxConfig) -> Result<SandboxStatus, Box<dyn Error>> {
         use cgroups_fs::CgroupsCommandExt;
         use std::time::Duration;
@@ -348,6 +375,7 @@ impl Sandbox {
             return_code,
         })
     }
+    /// 移除沙箱
     fn remove(&mut self) {
         use std::ffi::OsStr;
         if self.mounted == false {
