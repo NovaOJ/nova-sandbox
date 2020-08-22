@@ -3,6 +3,7 @@ use std::os::unix::process::CommandExt;
 use std::process::Stdio;
 
 /// Sandbox 运行配置
+#[derive(Debug)]
 pub struct SandboxConfig {
     /// 将要执行的命令 bash
     pub command: String,

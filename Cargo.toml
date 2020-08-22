@@ -13,10 +13,14 @@ cgroups-fs = "1.1.2"
 log = "0.4.8"
 libmount = "0.1.15"
 nix = "0.17.0"
-# pretty_env_logger = "0.4.0"
+pretty_env_logger = "0.4.0"
 # time = "0.2.16"
 uuid = { version = "0.8.1", features = ["v4"] }
 wait-timeout = "0.2.0"
+clap = "2.33.3"
 
 [dev-dependencies]
 pretty_env_logger = "0.4.0"
+
+[[bin]]
+name ="nova-sandbox"
