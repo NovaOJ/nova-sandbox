@@ -56,7 +56,7 @@ fn main() {
                 .long("memory")
                 .short("m")
                 .value_name("INT")
-                .help("Memory limit in bytes")
+                .help("Memory limit in KiB")
                 .required(true)
                 .takes_value(true),
         )
@@ -81,7 +81,7 @@ fn main() {
 
     let config = nova_sandbox::SandboxConfig::new(
         matches.value_of("time").unwrap().parse::<u64>().unwrap(),
-        matches.value_of("memory").unwrap().parse::<u64>().unwrap(),
+        matches.value_of("memory").unwrap().parse::<u64>().unwrap() * 1024,
         matches.value_of("pids").unwrap().parse::<u16>().unwrap(),
         matches.value_of("command").unwrap(),
         Stdio::inherit(),
@@ -89,11 +89,14 @@ fn main() {
         Stdio::inherit(),
     );
     log::trace!("{:?}", config);
+
     let sandbox = nova_sandbox::Sandbox::new(
         matches.value_of("rootfs").unwrap(),
         matches.value_of("work").unwrap(),
         matches.value_of("target").unwrap(),
     )
     .unwrap();
-    log::info!("{:?}", sandbox.run(config));
+
+    let status = sandbox.run(config);
+    log::info!("{:?}", status);
 }

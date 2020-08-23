@@ -1,6 +1,6 @@
 [package]
 name = "nova-sandbox"
-version = "0.1.0"
+version = "0.1.1"
 authors = ["Woshiluo Luo <woshiluo.luo@outlook.com>"]
 edition = "2018"
 license = "AGPL v3.0"

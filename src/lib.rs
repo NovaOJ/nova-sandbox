@@ -117,7 +117,7 @@ impl SandboxCgroup {
         log::info!("Try kill all in cgroup {:?}", &freezer);
         log::trace!("Current task list {:?}", freezer.get_tasks()?);
 
-        if self.is_empty()? == true {
+        if self.is_empty()? {
             return Ok(());
         };
 
@@ -136,14 +136,14 @@ impl SandboxCgroup {
         freezer.set_value::<&str>("freezer.state", "THAWED")?;
         while timeout > std::time::Duration::from_millis(0) {
             log::trace!("{:?}: checking...", timeout);
-            if self.is_empty()? == true {
+            if self.is_empty()? {
                 return Ok(());
             }
             std::thread::sleep(delay);
             timeout -= delay;
         }
 
-        Err("Failed to kill all tasks".to_string().into())
+        Err("Failed to kill all task(s)".to_string().into())
     }
 }
 
@@ -161,6 +161,7 @@ pub struct Sandbox {
 }
 
 /// Sandbox 运行状态种类
+/// 如果一个程序遇到了多个错误，那么优先级是 tle > mle > re > success
 #[derive(Debug)]
 pub enum SandboxStatusKind {
     /// 超时
@@ -170,7 +171,7 @@ pub enum SandboxStatusKind {
     /// 运行时错误/返回值非 0
     RuntimeError,
     /// 正常
-    Success, // tle > mle > re > seccess
+    Success,
 }
 
 /// 沙箱运行状态
@@ -287,7 +288,6 @@ impl Sandbox {
                 let return_code = match child_exec.wait_timeout(time_limit * 2).unwrap() {
                     Some(status) => status.code(),
                     _ => {
-                        log::debug!("Time Limit: {:?}, TLE", time_limit);
                         child_exec.kill().unwrap();
                         child_exec.wait().unwrap().code()
                     }
@@ -306,7 +306,7 @@ impl Sandbox {
 
                 // Look up until timeout or no task in cgroup
                 while timeout > zero_time {
-                    if cgroup.is_empty()? == true {
+                    if cgroup.is_empty()? {
                         break;
                     }
                     std::thread::sleep(delay);
@@ -319,7 +319,7 @@ impl Sandbox {
                     Exited(_pid, status) => Some(status),
                     _ => None,
                 };
-                log::trace!("{:?}", return_code);
+                log::trace!("main: {:?}", return_code);
 
                 if timeout == zero_time {
                     used_time = std::cmp::max(time_limit + delay, cgroup.get_cpu_time()?);
@@ -332,13 +332,13 @@ impl Sandbox {
         cgroup
             .kill_all_tasks(std::time::Duration::from_millis(1000))
             .unwrap_or_else(|err| {
-                log::warn!("{}", err);
+                log::warn!("failed to kill all task in cgroup: {}", err);
             });
 
         // Get return code
-        log::debug!("{:?}", return_code);
         let return_code = match return_code {
             // Rust Crashes
+            // TODO: Does rust crash should terminal process?
             Some(101) => {
                 log::error!("Failed to run command");
                 return Err(String::from("Failed to run command").into());
@@ -380,7 +380,7 @@ impl Sandbox {
     fn remove(&mut self) {
         use std::ffi::OsStr;
         if self.mounted == false {
-            log::warn!("Try to remove an umounted sandbox");
+            log::warn!("Try to remove an unmounted sandbox");
             return;
         }
         log::info!("Remove sandbox on {:?}", &self);
@@ -392,7 +392,7 @@ impl Sandbox {
 
 impl Drop for Sandbox {
     fn drop(&mut self) {
-        log::trace!("DROP {:?}", self);
+        log::debug!("DROP {:?}", self);
         self.remove();
     }
 }

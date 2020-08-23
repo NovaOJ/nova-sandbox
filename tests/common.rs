@@ -9,7 +9,7 @@ pub fn run_sandbox<T: std::fmt::Display>(command: T) -> nova_sandbox::SandboxSta
     fs::create_dir(&sandbox_directory).unwrap();
 
     let sandbox = Sandbox::new(
-        "/work/package/debs/debian-rootfs",
+        "/work/package/debs/linux-rootfs",
         &work_directory,
         &sandbox_directory,
     )
